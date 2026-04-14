@@ -1,4 +1,4 @@
-Satats pour detecter les defauts d'un capteur:
+je vous donne ces dits total, NB : je travaillais sur la stabilité des machine en ce basant sur des methodes statitstiques (les residus entre la regression lineaire et le signal, et les coefficients des pentes ), j'avais fais un histogramme croisé pour voir la quantité des segmment dans une plage de pente, et la quantoté des residus dans une plage donnée aussi, ensuite un diagramme des residus e, fonction des pentes qui m'ont permi de dire si la machine est stable ou pas , alos il veut que à ppartir des ces criteres statistitques je fais de tel sorte que calculer les defauts d'un capteur. voici ces paroles (Satats pour detecter les defauts d'un capteur:
 
 l'idée je pensais dire par rapport à ce que j'avais precedent comment je peux exploiter cette approche, 
 la question qui avait c'est comment je vais essayer de surveiller un capteur, 
@@ -21,7 +21,7 @@ je dis mon signal quand il est stable en moyenne est ce que comment je peux surv
 ça l'interet c'est de pouvoir le faire presque signal pour signal.
 le cas extreme de cas c'est de saturation normalement ça peut etre facile mais il faut je puisse les attraper en automatique sans avoir m'exposé les unes pour dire que mon signal en ayant creusé sur le demiel signal il est constant  depuis une semaine ça va pas,
 donc il faut pouvoir l'automatiser dans les casses relativement simple de defaillance de saturation et apres dans les cas un peu plus fin c'est une egradation progressive avec indicateurs qui sont les residus qui font que monter ,
-et mes signaux abetrents que j'aime bien filtrer avoir une statistique de pourcentage de signaux  considerées comme aberents
+et mes signaux abetrents que j'aime bien filtrer avoir une statistique de pourcentage de signaux  considerées comme aberents)
 
 
 
