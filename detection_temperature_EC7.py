@@ -32,23 +32,24 @@ def stop_timer(label):
 #  PARAMÈTRES GLOBAUX
 # ═══════════════════════════════════════════════════════════════════
 
-dossier = r"G:\_NPI\00-Digital\Alternant Mountakha Ndiaye\Stats documents\rou_test_withou_zero\EC7"
+# Tu peux mettre :
+# 1) soit le chemin d'un dossier contenant un ou plusieurs fichiers Excel
+# 2) soit le chemin complet d'un fichier Excel précis
+
+source_donnees = r"G:\_NPI\00-Digital\Alternant Mountakha Ndiaye\Stats documents\stats recherche\Defaut d'un capteur\EC7"
 
 # Fenêtre glissante
-T_segment     = 7200   # durée d'une fenêtre en secondes (2 h)
+T_segment = 7200       # durée d'une fenêtre en secondes (2 h)
 pas_glissement = 1800  # pas de glissement en secondes (30 min)
 
 # Années
-annee_ref      = [2018, 2019]
+annee_ref = [2018, 2019]
 annees_compare = (2020, 2021, 2022, 2023, 2024, 2025)
 
 # Seuil Aitouche — loi normale centrée réduite, α = 5 %
 SEUIL_TCN = 1.96
 
 # Critères de stabilité de la fenêtre glissante (pente + σ résidus)
-# À calibrer selon l'amplitude réelle de ton signal température EC7 :
-#   pmin / pmax : dérive max tolérée en °C/s sur une fenêtre
-#   r2max       : écart-type résidus max toléré en °C
 SEUILS_PENTE = {
     "Temperature": {"pmin": -0.005, "pmax": 0.005, "r2max": 2.0},
 }
@@ -68,16 +69,16 @@ PALETTE = {
     2025: "purple",
 }
 
-# Couleurs par type de défaut (pour le plot de localisation)
+# Couleurs par type de défaut
 COULEURS_DEFAUT = {
-    "Biais positif (offset)":       "red",
-    "Biais négatif (offset)":       "darkred",
-    "Dérive croissante (drift)":    "orange",
-    "Dérive décroissante (drift)":  "darkorange",
-    "Bruit excessif (fidélité)":    "purple",
-    "Blocage (capteur figé)":       "black",
+    "Biais positif (offset)": "red",
+    "Biais négatif (offset)": "darkred",
+    "Dérive croissante (drift)": "orange",
+    "Dérive décroissante (drift)": "darkorange",
+    "Bruit excessif (fidélité)": "purple",
+    "Blocage (capteur figé)": "black",
     "Transitoire / bruit passager": "lightgray",
-    "Anomalie non classifiée":      "gray",
+    "Anomalie non classifiée": "gray",
 }
 
 
@@ -85,57 +86,108 @@ COULEURS_DEFAUT = {
 #  LECTURE EXCEL
 # ═══════════════════════════════════════════════════════════════════
 
-def lire_premier_excel(dossier):
+def trouver_fichier_excel(source):
     """
-    Lit le premier fichier .xlsx trouvé dans le dossier.
-    Renomme automatiquement la colonne température quelle que soit
-    sa casse ("temperature", "Temperature", "temp", "TEMP"…).
-    Retourne : (chemin, DataFrame nettoyé).
-    """
-    fichiers = [
-        f for f in os.listdir(dossier)
-        if f.endswith(".xlsx") and not f.startswith("~$")
-    ]
-    if not fichiers:
-        raise FileNotFoundError("Aucun fichier Excel valide trouvé dans le dossier.")
+    Retourne le chemin complet d'un fichier Excel valide.
 
-    chemin = os.path.join(dossier, fichiers[0])
+    Cas possibles :
+    - source est un fichier .xlsx
+    - source est un dossier contenant un ou plusieurs .xlsx
+    """
+
+    if not os.path.exists(source):
+        raise FileNotFoundError(
+            f"Le chemin spécifié est introuvable :\n{source}\n\n"
+            "Vérifie la variable 'source_donnees'."
+        )
+
+    # Cas 1 : source = fichier Excel direct
+    if os.path.isfile(source):
+        if source.lower().endswith(".xlsx") and not os.path.basename(source).startswith("~$"):
+            return source
+        else:
+            raise ValueError(
+                f"Le fichier indiqué n'est pas un fichier Excel .xlsx valide :\n{source}"
+            )
+
+    # Cas 2 : source = dossier
+    if os.path.isdir(source):
+        fichiers = [
+            f for f in os.listdir(source)
+            if f.lower().endswith(".xlsx") and not f.startswith("~$")
+        ]
+
+        if not fichiers:
+            raise FileNotFoundError(
+                f"Aucun fichier Excel valide (.xlsx) trouvé dans le dossier :\n{source}"
+            )
+
+        # Tri alphabétique pour toujours prendre le même premier fichier
+        fichiers = sorted(fichiers)
+        return os.path.join(source, fichiers[0])
+
+    raise ValueError("La source fournie n'est ni un fichier valide ni un dossier.")
+
+
+def lire_premier_excel(source):
+    """
+    Lit le fichier Excel trouvé.
+    Renomme automatiquement la colonne température quelle que soit sa casse.
+    Retourne : (chemin_excel, DataFrame nettoyé).
+    """
+    chemin = trouver_fichier_excel(source)
+
+    print(f"[INFO] Fichier Excel utilisé : {chemin}")
+
     start_timer("Lecture Excel")
 
     df = pd.read_excel(chemin, engine="openpyxl")
-    df.columns = [c.strip() for c in df.columns]
+    df.columns = [str(c).strip() for c in df.columns]
 
     # Renommage flexible
     mapping = {
-        "date":        "Date",
+        "date": "Date",
         "temperature": "Temperature",
-        "temp":        "Temperature",
+        "temp": "Temperature",
         "température": "Temperature",
     }
     df.columns = [mapping.get(c.lower(), c) for c in df.columns]
 
     if "Date" not in df.columns:
-        raise KeyError("Colonne 'Date' introuvable après renommage.")
+        raise KeyError(
+            "Colonne 'Date' introuvable après renommage. "
+            f"Colonnes détectées : {list(df.columns)}"
+        )
+
     if "Temperature" not in df.columns:
         raise KeyError(
             "Colonne 'Temperature' introuvable. "
-            "Noms acceptés : 'temperature', 'temp', 'température'."
+            "Noms acceptés : 'temperature', 'temp', 'température'. "
+            f"Colonnes détectées : {list(df.columns)}"
         )
 
     # Conversion des types
-    df["Date"]        = pd.to_datetime(df["Date"], errors="coerce")
+    df["Date"] = pd.to_datetime(df["Date"], errors="coerce")
     df["Temperature"] = pd.to_numeric(df["Temperature"], errors="coerce")
 
     # Suppression des lignes incomplètes
     df.dropna(subset=["Date", "Temperature"], inplace=True)
 
+    if df.empty:
+        raise ValueError("Le fichier Excel ne contient aucune ligne exploitable après nettoyage.")
+
+    # Tri chronologique
+    df.sort_values("Date", inplace=True)
+    df.reset_index(drop=True, inplace=True)
+
     # Variables dérivées
-    df["Secondes"]   = (df["Date"] - df["Date"].iloc[0]).dt.total_seconds()
-    df["Année"]      = df["Date"].dt.year
+    df["Secondes"] = (df["Date"] - df["Date"].iloc[0]).dt.total_seconds()
+    df["Année"] = df["Date"].dt.year
     df["Jour_annee"] = df["Date"].dt.dayofyear
 
     stop_timer("Lecture Excel")
     print(f"[Excel] {len(df)} lignes chargées — années : {sorted(df['Année'].unique())}")
+
     return chemin, df
 
 
@@ -156,40 +208,39 @@ def analyser_variable(df, value_col, pmin, pmax, r2max, bins_pente):
 
     Retourne : (DataFrame des fenêtres, pct stabilité, agrégations).
     """
-    secs  = df["Secondes"].values
+    secs = df["Secondes"].values
     y_all = df[value_col].values
 
     if len(secs) == 0:
         return pd.DataFrame(), None, None
 
     T_tot = secs[-1]
-    out   = []
+    out = []
 
     for t in range(0, int(T_tot - T_segment + 1), pas_glissement):
         m = (secs >= t) & (secs < t + T_segment)
         x = secs[m]
         y = y_all[m]
+
         if len(x) < 12:
             continue
 
         A = np.vstack([x, np.ones_like(x)]).T
         pente, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
         resid = y - (pente * x + intercept)
-        R2    = np.std(resid)
+        R2 = np.std(resid)
 
-        etat = (
-            "Stable"
-            if (pmin <= pente <= pmax) and (R2 <= r2max)
-            else "Instable"
-        )
+        etat = "Stable" if (pmin <= pente <= pmax) and (R2 <= r2max) else "Instable"
+
         out.append({
             "centre": t + T_segment / 2.0,
-            "pente":  pente,
-            "R2":     R2,
-            "etat":   etat,
+            "pente": pente,
+            "R2": R2,
+            "etat": etat,
         })
 
     res = pd.DataFrame(out)
+
     if res.empty:
         return res, None, None
 
@@ -203,21 +254,23 @@ def analyser_variable(df, value_col, pmin, pmax, r2max, bins_pente):
 
     agg = (
         res.groupby("etat")
-           .agg(
-               pente_min=("pente", "min"),
-               pente_max=("pente", "max"),
-               R2_min=("R2", "min"),
-               R2_max=("R2", "max"),
-           )
-           .reset_index()
+        .agg(
+            pente_min=("pente", "min"),
+            pente_max=("pente", "max"),
+            R2_min=("R2", "min"),
+            R2_max=("R2", "max"),
+        )
+        .reset_index()
     )
+
     glob = pd.DataFrame([{
-        "etat":      "Global",
+        "etat": "Global",
         "pente_min": res["pente"].min(),
         "pente_max": res["pente"].max(),
-        "R2_min":    res["R2"].min(),
-        "R2_max":    res["R2"].max(),
+        "R2_min": res["R2"].min(),
+        "R2_max": res["R2"].max(),
     }])
+
     agg = pd.concat([glob, agg], ignore_index=True)
 
     return res, pct, agg
@@ -240,15 +293,18 @@ def calcul_stabilite_toutes_annees(df, var_name):
             continue
 
         secs = dfa["Secondes"].values
-        sig  = dfa[var_name].values
+        sig = dfa[var_name].values
+
         if len(secs) < 20:
             continue
 
         T_loc = secs[-1]
+
         for t in range(0, int(T_loc - T_segment + 1), pas_glissement):
             idx = (secs >= t) & (secs < t + T_segment)
             x = secs[idx]
             y = sig[idx]
+
             if len(x) < 12:
                 continue
 
@@ -272,7 +328,7 @@ def plot_scatter_pente_R2(res, var_name, show_r2_threshold=True):
     pmin, pmax, r2max = s["pmin"], s["pmax"], s["r2max"]
 
     fig = go.Figure()
-    st   = res[res["etat"] == "Stable"]
+    st = res[res["etat"] == "Stable"]
     inst = res[res["etat"] == "Instable"]
 
     if not st.empty:
@@ -281,6 +337,7 @@ def plot_scatter_pente_R2(res, var_name, show_r2_threshold=True):
             name="Stable",
             marker=dict(color="green", size=6, opacity=0.7),
         ))
+
     if not inst.empty:
         fig.add_trace(go.Scatter(
             x=inst["R2"], y=inst["pente"], mode="markers",
@@ -290,6 +347,7 @@ def plot_scatter_pente_R2(res, var_name, show_r2_threshold=True):
 
     fig.add_hline(y=pmin, line_dash="dash", line_color="gray")
     fig.add_hline(y=pmax, line_dash="dash", line_color="gray")
+
     if show_r2_threshold:
         fig.add_vline(x=r2max, line_dash="dash", line_color="gray")
 
@@ -298,6 +356,7 @@ def plot_scatter_pente_R2(res, var_name, show_r2_threshold=True):
         + (f", σ ≤ {r2max} °C" if show_r2_threshold else "")
         + ")"
     )
+
     fig.update_layout(
         title=f"Diagramme Pente vs σ résidus — {var_name} {top}",
         xaxis_title="σ résidus (°C)",
@@ -314,11 +373,9 @@ def plot_histogram_croise(res, var_name):
       % segments  = nb segments dans une classe / nb total segments
       % résidus   = somme(σ) dans une classe / somme(σ) totale
     """
-    pct_segments = (
-        res["pente_bin"].value_counts(normalize=True).sort_index() * 100
-    )
-    r2_sum  = res.groupby("pente_bin")["R2"].sum().reindex(pct_segments.index)
-    total   = r2_sum.sum()
+    pct_segments = res["pente_bin"].value_counts(normalize=True).sort_index() * 100
+    r2_sum = res.groupby("pente_bin")["R2"].sum().reindex(pct_segments.index)
+    total = r2_sum.sum()
     pct_res = (r2_sum / total * 100) if total > 0 else r2_sum * 0
 
     fig = go.Figure()
@@ -358,8 +415,6 @@ def calcul_sigma_temperature(df, stable_ref_mask, years_ref=annee_ref):
     sur la référence stable 2018-2019.
 
     σ_ref = std(T − µ_ref) sur ces points.
-
-    Retourne : (mu_ref, sigma_ref) en °C.
     """
     ref = df.loc[
         stable_ref_mask & df["Année"].isin(years_ref),
@@ -370,13 +425,14 @@ def calcul_sigma_temperature(df, stable_ref_mask, years_ref=annee_ref):
         raise ValueError(
             "Référence stable vide — aucun point stable sur les années de référence."
         )
+
     if len(ref) < 30:
         raise ValueError(
             f"Pas assez de points référence pour estimer σ (n={len(ref)}, min=30)."
         )
 
-    mu_ref    = float(ref.mean())
-    sigma_ref = float(ref.std(ddof=0))   # écart-type population (cohérent avec ton code)
+    mu_ref = float(ref.mean())
+    sigma_ref = float(ref.std(ddof=0))
     return mu_ref, sigma_ref
 
 
@@ -384,19 +440,10 @@ def calcul_sigma_temperature(df, stable_ref_mask, years_ref=annee_ref):
 #  AITOUCHE IV.1 — CALCUL TCN PAR FENÊTRE GLISSANTE
 # ═══════════════════════════════════════════════════════════════════
 
-def calcul_tcn_fenetres(df, stable_global_mask, mu_ref, sigma_ref,
-                         years_order=None):
+def calcul_tcn_fenetres(df, stable_global_mask, mu_ref, sigma_ref, years_order=None):
     """
-    Pour chaque fenêtre glissante (sur les points stables) :
-        TCN_k = (µ_fenêtre − µ_ref) / σ_ref        [Aitouche eq. IV.7]
-
-    Classification à 3 niveaux :
-        Normal  : |TCN| ≤ 1.96   (α = 5 %)
-        Alerte  : 1.96 < |TCN| ≤ 3.0
-        Défaut  : |TCN| > 3.0
-
-    Retourne un DataFrame avec colonnes :
-        Année, centre_sec, Jour_annee, mu_fen, sigma_fen, TCN, etat
+    Pour chaque fenêtre glissante :
+        TCN_k = (µ_fenêtre − µ_ref) / σ_ref
     """
     if years_order is None:
         years_order = sorted(df["Année"].unique())
@@ -411,25 +458,25 @@ def calcul_tcn_fenetres(df, stable_global_mask, mu_ref, sigma_ref,
         if dfa.empty:
             continue
 
-        # On travaille uniquement sur les points stables (cohérent avec ton masque)
         dfa_stable = dfa[stable_global_mask[dfa.index]]
         if dfa_stable.empty:
             continue
 
         secs = dfa_stable["Secondes"].values
         temp = dfa_stable["Temperature"].values
-        doy  = dfa_stable["Jour_annee"].values
+        doy = dfa_stable["Jour_annee"].values
         T_loc = secs[-1]
 
         for t in range(0, int(T_loc - T_segment + 1), pas_glissement):
             idx = (secs >= t) & (secs < t + T_segment)
-            y   = temp[idx]
+            y = temp[idx]
+
             if len(y) < 12:
                 continue
 
-            mu_fen    = float(np.mean(y))
+            mu_fen = float(np.mean(y))
             sigma_fen = float(np.std(y, ddof=0))
-            tcn       = (mu_fen - mu_ref) / sigma_ref
+            tcn = (mu_fen - mu_ref) / sigma_ref
 
             if abs(tcn) <= SEUIL_TCN:
                 etat = "Normal"
@@ -439,13 +486,13 @@ def calcul_tcn_fenetres(df, stable_global_mask, mu_ref, sigma_ref,
                 etat = "Défaut"
 
             rows.append({
-                "Année":      an,
+                "Année": an,
                 "centre_sec": t + T_segment / 2.0,
                 "Jour_annee": float(np.mean(doy[idx])),
-                "mu_fen":     mu_fen,
-                "sigma_fen":  sigma_fen,
-                "TCN":        tcn,
-                "etat":       etat,
+                "mu_fen": mu_fen,
+                "sigma_fen": sigma_fen,
+                "TCN": tcn,
+                "etat": etat,
             })
 
     return pd.DataFrame(rows)
@@ -456,34 +503,22 @@ def calcul_tcn_fenetres(df, stable_global_mask, mu_ref, sigma_ref,
 # ═══════════════════════════════════════════════════════════════════
 
 def _creer_ligne(grp, annee, type_defaut):
-    """Construit une ligne de résultat pour un segment d'anomalie."""
     return {
-        "Année":          annee,
-        "Jour_debut":     float(grp["Jour_annee"].min()),
-        "Jour_fin":       float(grp["Jour_annee"].max()),
+        "Année": annee,
+        "Jour_debut": float(grp["Jour_annee"].min()),
+        "Jour_fin": float(grp["Jour_annee"].max()),
         "Durée_fenêtres": len(grp),
-        "TCN_moyen":      float(grp["TCN"].mean()),
-        "TCN_max_abs":    float(grp["TCN"].abs().max()),
-        "mu_fen_moy":     float(grp["mu_fen"].mean()),
-        "Type_defaut":    type_defaut,
-        "Sévérité":       grp["etat"].max(),   # "Alerte" < "Défaut" (ordre alpha OK)
+        "TCN_moyen": float(grp["TCN"].mean()),
+        "TCN_max_abs": float(grp["TCN"].abs().max()),
+        "mu_fen_moy": float(grp["mu_fen"].mean()),
+        "Type_defaut": type_defaut,
+        "Sévérité": grp["etat"].max(),
     }
 
 
 def localiser_defaut(tcn_df, sigma_ref):
     """
-    Pour chaque séquence consécutive de fenêtres en anomalie,
-    analyse la FORME du TCN pour identifier le type de défaut.
-
-    Critères (inspirés Aitouche chap. II + IV) :
-      - Blocage       : σ des µ_fen successives ≈ 0  (signal figé)
-      - Bruit excessif: TCN oscille fortement des deux côtés
-      - Dérive        : TCN suit une tendance linéaire significative
-      - Biais positif : TCN positif de façon persistante (> 80 % des fenêtres)
-      - Biais négatif : TCN négatif de façon persistante (< 20 % positif)
-      - Non classifié : aucun critère dominant
-
-    Retourne un DataFrame une ligne par segment d'anomalie.
+    Identifie le type de défaut sur les séquences anormales.
     """
     if tcn_df.empty:
         return pd.DataFrame()
@@ -495,51 +530,34 @@ def localiser_defaut(tcn_df, sigma_ref):
         if df_an.empty:
             continue
 
-        # Repère les séquences consécutives en anomalie
         df_an["anomalie"] = df_an["etat"].isin(["Alerte", "Défaut"])
-        df_an["groupe"]   = (
-            (df_an["anomalie"] != df_an["anomalie"].shift()).cumsum()
-        )
+        df_an["groupe"] = (df_an["anomalie"] != df_an["anomalie"].shift()).cumsum()
 
         for _, grp in df_an[df_an["anomalie"]].groupby("groupe"):
-
-            tcn_vals    = grp["TCN"].values
+            tcn_vals = grp["TCN"].values
             mu_fen_vals = grp["mu_fen"].values
             sigma_fen_vals = grp["sigma_fen"].values
 
-            # ── Critère 0 : transitoire (segment trop court) ──────
             if len(grp) < 3:
-                resultats.append(
-                    _creer_ligne(grp, an, "Transitoire / bruit passager")
-                )
+                resultats.append(_creer_ligne(grp, an, "Transitoire / bruit passager"))
                 continue
 
-            # ── Critère 1 : blocage — température figée ───────────
-            # Si le capteur est bloqué, les µ_fen successives sont
-            # quasi constantes et sigma_fen ≈ 0
-            sigma_mu       = float(np.std(mu_fen_vals, ddof=0))
+            sigma_mu = float(np.std(mu_fen_vals, ddof=0))
             sigma_fen_mean = float(np.mean(sigma_fen_vals))
 
             if sigma_mu < 0.05 * sigma_ref and sigma_fen_mean < 0.05 * sigma_ref:
                 resultats.append(_creer_ligne(grp, an, "Blocage (capteur figé)"))
                 continue
 
-            # ── Critère 2 : bruit excessif ────────────────────────
-            # TCN oscille fréquemment des deux côtés ET écart-type élevé
             changements_signe = int(np.sum(np.diff(np.sign(tcn_vals)) != 0))
-            sigma_tcn         = float(np.std(tcn_vals, ddof=0))
+            sigma_tcn = float(np.std(tcn_vals, ddof=0))
 
             if changements_signe >= len(tcn_vals) // 2 and sigma_tcn > 2.0:
-                resultats.append(
-                    _creer_ligne(grp, an, "Bruit excessif (fidélité)")
-                )
+                resultats.append(_creer_ligne(grp, an, "Bruit excessif (fidélité)"))
                 continue
 
-            # ── Critère 3 : dérive — tendance linéaire ────────────
-            # On ajuste une droite sur les TCN successifs ;
-            # si la pente est significative et les résidus faibles → dérive
             x_seq = np.arange(len(tcn_vals), dtype=float)
-            A     = np.vstack([x_seq, np.ones_like(x_seq)]).T
+            A = np.vstack([x_seq, np.ones_like(x_seq)]).T
             coeffs = np.linalg.lstsq(A, tcn_vals, rcond=None)[0]
             pente_tcn = float(coeffs[0])
             resid_tendance = float(
@@ -548,38 +566,26 @@ def localiser_defaut(tcn_df, sigma_ref):
 
             if abs(pente_tcn) > 0.1 and resid_tendance < sigma_tcn * 0.6:
                 sens = "croissante" if pente_tcn > 0 else "décroissante"
-                resultats.append(
-                    _creer_ligne(grp, an, f"Dérive {sens} (drift)")
-                )
+                resultats.append(_creer_ligne(grp, an, f"Dérive {sens} (drift)"))
                 continue
 
-            # ── Critère 4 : biais — décalage persistant d'un côté ─
             pct_positif = float(np.mean(tcn_vals > 0))
+
             if pct_positif > 0.80:
-                resultats.append(
-                    _creer_ligne(grp, an, "Biais positif (offset)")
-                )
+                resultats.append(_creer_ligne(grp, an, "Biais positif (offset)"))
             elif pct_positif < 0.20:
-                resultats.append(
-                    _creer_ligne(grp, an, "Biais négatif (offset)")
-                )
+                resultats.append(_creer_ligne(grp, an, "Biais négatif (offset)"))
             else:
-                resultats.append(
-                    _creer_ligne(grp, an, "Anomalie non classifiée")
-                )
+                resultats.append(_creer_ligne(grp, an, "Anomalie non classifiée"))
 
     return pd.DataFrame(resultats)
 
 
 # ═══════════════════════════════════════════════════════════════════
-#  UTILITAIRE : courbe continue par jour (médiane + interpolation)
+#  UTILITAIRE : courbe continue par jour
 # ═══════════════════════════════════════════════════════════════════
 
 def courbe_continue_par_jour(df_part, value_col, method="linear"):
-    """
-    Transforme un DataFrame (Jour_annee, value_col) en courbe continue
-    sur les jours 1-365 par médiane + interpolation.
-    """
     s = df_part.groupby("Jour_annee")[value_col].median()
     s = s.reindex(range(1, 366))
     s = s.interpolate(method=method, limit_direction="both")
@@ -592,23 +598,16 @@ def courbe_continue_par_jour(df_part, value_col, method="linear"):
 #  PLOTS TCN
 # ═══════════════════════════════════════════════════════════════════
 
-def plot_tcn_annees_superposees(tcn_df, years_ref=annee_ref,
-                                 years_compare=annees_compare):
-    """
-    TCN superposé par année (équivalent de calcul_difference_supperposee
-    de l'ancien code Vitesse+Vibration).
-    Bandes Aitouche : ±1.96 (alerte) et ±3.0 (défaut franc).
-    """
+def plot_tcn_annees_superposees(tcn_df, years_ref=annee_ref, years_compare=annees_compare):
     fig = go.Figure()
 
-    # Référence 2018-2019
     ref = tcn_df[tcn_df["Année"].isin(years_ref)]
     if not ref.empty:
         ref_mean = (
             ref.groupby("Jour_annee")["TCN"]
-               .mean()
-               .reindex(range(1, 366))
-               .interpolate(method="linear", limit_direction="both")
+            .mean()
+            .reindex(range(1, 366))
+            .interpolate(method="linear", limit_direction="both")
         )
         fig.add_trace(go.Scatter(
             x=np.arange(1, 366), y=ref_mean.values,
@@ -616,40 +615,32 @@ def plot_tcn_annees_superposees(tcn_df, years_ref=annee_ref,
             line=dict(color="black", width=3),
         ))
 
-    # Autres années
     for an in sorted(years_compare):
         part = tcn_df[tcn_df["Année"] == an]
         if part.empty:
             continue
+
         s = (
             part.set_index("Jour_annee")["TCN"]
-                .reindex(range(1, 366))
-                .interpolate(method="linear", limit_direction="both")
+            .reindex(range(1, 366))
+            .interpolate(method="linear", limit_direction="both")
         )
+
         fig.add_trace(go.Scatter(
             x=np.arange(1, 366), y=s.values,
             mode="lines", name=str(an),
             line=dict(color=PALETTE.get(an, "gray"), width=2),
         ))
 
-    # Bandes Aitouche
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    fig.add_hline(
-        y=+SEUIL_TCN, line_dash="dash", line_color="orange",
-        annotation_text="+1.96 (alerte)", annotation_position="top left",
-    )
-    fig.add_hline(
-        y=-SEUIL_TCN, line_dash="dash", line_color="orange",
-        annotation_text="-1.96", annotation_position="bottom left",
-    )
-    fig.add_hline(
-        y=+3.0, line_dash="dot", line_color="red",
-        annotation_text="+3σ (défaut franc)", annotation_position="top left",
-    )
-    fig.add_hline(
-        y=-3.0, line_dash="dot", line_color="red",
-        annotation_text="-3σ", annotation_position="bottom left",
-    )
+    fig.add_hline(y=+SEUIL_TCN, line_dash="dash", line_color="orange",
+                  annotation_text="+1.96 (alerte)", annotation_position="top left")
+    fig.add_hline(y=-SEUIL_TCN, line_dash="dash", line_color="orange",
+                  annotation_text="-1.96", annotation_position="bottom left")
+    fig.add_hline(y=+3.0, line_dash="dot", line_color="red",
+                  annotation_text="+3σ (défaut franc)", annotation_position="top left")
+    fig.add_hline(y=-3.0, line_dash="dot", line_color="red",
+                  annotation_text="-3σ", annotation_position="bottom left")
 
     fig.update_traces(line_shape="spline")
     fig.update_layout(
@@ -663,26 +654,25 @@ def plot_tcn_annees_superposees(tcn_df, years_ref=annee_ref,
 
 
 def plot_tcn_continu(tcn_df,
-                      years_order=(2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025),
-                      out_dir=None, export_html=True):
-    """
-    TCN sur axe temporel continu — toutes les années collées
-    (équivalent de temporel_continue de l'ancien code).
-    """
+                     years_order=(2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025),
+                     out_dir=None, export_html=True):
     pieces = []
+
     for an in years_order:
         part = tcn_df[tcn_df["Année"] == an][["Jour_annee", "TCN"]].copy()
         if part.empty:
             continue
+
         s = (
             part.set_index("Jour_annee")["TCN"]
-                .reindex(range(1, 366))
-                .interpolate(method="linear", limit_direction="both")
-                .reset_index()
+            .reindex(range(1, 366))
+            .interpolate(method="linear", limit_direction="both")
+            .reset_index()
         )
-        s.columns    = ["Jour_annee", "TCN"]
+
+        s.columns = ["Jour_annee", "TCN"]
         s["X_global"] = an * 366 + s["Jour_annee"].astype(int)
-        s["Année"]    = an
+        s["Année"] = an
         pieces.append(s)
 
     if not pieces:
@@ -697,26 +687,16 @@ def plot_tcn_continu(tcn_df,
         line=dict(width=2, color="black"),
     ))
 
-    # Bandes
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    fig.add_hline(
-        y=+SEUIL_TCN, line_dash="dash", line_color="orange",
-        annotation_text="+1.96",
-    )
-    fig.add_hline(
-        y=-SEUIL_TCN, line_dash="dash", line_color="orange",
-        annotation_text="-1.96",
-    )
-    fig.add_hline(
-        y=+3.0, line_dash="dot", line_color="red",
-        annotation_text="+3σ",
-    )
-    fig.add_hline(
-        y=-3.0, line_dash="dot", line_color="red",
-        annotation_text="-3σ",
-    )
+    fig.add_hline(y=+SEUIL_TCN, line_dash="dash", line_color="orange",
+                  annotation_text="+1.96")
+    fig.add_hline(y=-SEUIL_TCN, line_dash="dash", line_color="orange",
+                  annotation_text="-1.96")
+    fig.add_hline(y=+3.0, line_dash="dot", line_color="red",
+                  annotation_text="+3σ")
+    fig.add_hline(y=-3.0, line_dash="dot", line_color="red",
+                  annotation_text="-3σ")
 
-    # Séparateurs d'années
     for an in years_order:
         fig.add_vline(x=an * 366 + 1, line_dash="dot", line_color="lightgray")
 
@@ -741,17 +721,13 @@ def plot_tcn_continu(tcn_df,
 
 
 def plot_localisation_defauts(localisation_df, tcn_df):
-    """
-    Courbe TCN avec zones colorées par type de défaut.
-    Vue de diagnostic pour rapport ou présentation manager.
-    """
     fig = go.Figure()
 
-    # Courbes TCN par année (fond)
     for an in sorted(tcn_df["Année"].unique()):
         part = tcn_df[tcn_df["Année"] == an].sort_values("Jour_annee")
         if part.empty:
             continue
+
         fig.add_trace(go.Scatter(
             x=part["Jour_annee"], y=part["TCN"],
             mode="lines", name=str(an),
@@ -759,12 +735,8 @@ def plot_localisation_defauts(localisation_df, tcn_df):
             opacity=0.6,
         ))
 
-    # Zones colorées par type de défaut
-    seen_types = set()
     for _, row in localisation_df.iterrows():
-        couleur     = COULEURS_DEFAUT.get(row["Type_defaut"], "gray")
-        show_legend = row["Type_defaut"] not in seen_types
-        seen_types.add(row["Type_defaut"])
+        couleur = COULEURS_DEFAUT.get(row["Type_defaut"], "gray")
 
         fig.add_vrect(
             x0=row["Jour_debut"],
@@ -772,31 +744,17 @@ def plot_localisation_defauts(localisation_df, tcn_df):
             fillcolor=couleur,
             opacity=0.15,
             line_width=0,
-            annotation_text=row["Type_defaut"].split(" ")[0] if show_legend else "",
-            annotation_position="top left",
-            legendgroup=row["Type_defaut"],
-            showlegend=show_legend,
-            name=row["Type_defaut"],
         )
 
-    # Seuils
     fig.add_hline(y=0, line_dash="dash", line_color="gray")
-    fig.add_hline(
-        y=+SEUIL_TCN, line_dash="dash", line_color="orange",
-        annotation_text="+1.96 (alerte)",
-    )
-    fig.add_hline(
-        y=-SEUIL_TCN, line_dash="dash", line_color="orange",
-        annotation_text="-1.96",
-    )
-    fig.add_hline(
-        y=+3.0, line_dash="dot", line_color="red",
-        annotation_text="+3σ (défaut)",
-    )
-    fig.add_hline(
-        y=-3.0, line_dash="dot", line_color="red",
-        annotation_text="-3σ",
-    )
+    fig.add_hline(y=+SEUIL_TCN, line_dash="dash", line_color="orange",
+                  annotation_text="+1.96 (alerte)")
+    fig.add_hline(y=-SEUIL_TCN, line_dash="dash", line_color="orange",
+                  annotation_text="-1.96")
+    fig.add_hline(y=+3.0, line_dash="dot", line_color="red",
+                  annotation_text="+3σ (défaut)")
+    fig.add_hline(y=-3.0, line_dash="dot", line_color="red",
+                  annotation_text="-3σ")
 
     fig.update_layout(
         title="Localisation des types de défauts — Température EC7",
@@ -809,18 +767,16 @@ def plot_localisation_defauts(localisation_df, tcn_df):
 
 
 def plot_temperature_domaine_temporel(df, stable_temp_ref, seuil_min=None):
-    """
-    Superposition de la température brute par année
-    (équivalent de supperposition_année de l'ancien code).
-    """
     fig = go.Figure()
 
     ref_all = df.loc[
         stable_temp_ref & df["Année"].isin(annee_ref),
         ["Année", "Jour_annee", "Temperature"]
     ].copy()
+
     ref_all["Temperature"] = pd.to_numeric(ref_all["Temperature"], errors="coerce")
     ref_all.dropna(subset=["Temperature"], inplace=True)
+
     if seuil_min is not None:
         ref_all = ref_all[ref_all["Temperature"] > seuil_min]
 
@@ -833,14 +789,16 @@ def plot_temperature_domaine_temporel(df, stable_temp_ref, seuil_min=None):
 
     if curves:
         ref_curve_df = pd.concat(
-            [c.set_index("Jour_annee")["Temperature"] for c in curves], axis=1
+            [c.set_index("Jour_annee")["Temperature"] for c in curves],
+            axis=1
         )
         ref_mean = (
             ref_curve_df.mean(axis=1)
-                        .reindex(range(1, 366))
-                        .astype(float)
-                        .interpolate(method="linear", limit_direction="both")
+            .reindex(range(1, 366))
+            .astype(float)
+            .interpolate(method="linear", limit_direction="both")
         )
+
         fig.add_trace(go.Scatter(
             x=np.arange(1, 366), y=ref_mean.values,
             mode="lines", name="2018-2019 (réf stable)",
@@ -850,12 +808,17 @@ def plot_temperature_domaine_temporel(df, stable_temp_ref, seuil_min=None):
     for an in sorted(df["Année"].unique()):
         if an in annee_ref:
             continue
+
         part = df[df["Année"] == an][["Jour_annee", "Temperature"]].dropna().copy()
+
         if seuil_min is not None:
             part = part[part["Temperature"] > seuil_min]
+
         if part.empty:
             continue
+
         cont = courbe_continue_par_jour(part, "Temperature")
+
         fig.add_trace(go.Scatter(
             x=cont["Jour_annee"], y=cont["Temperature"],
             mode="lines", name=str(an),
@@ -878,27 +841,25 @@ def plot_temperature_domaine_temporel(df, stable_temp_ref, seuil_min=None):
 # ═══════════════════════════════════════════════════════════════════
 
 def main():
-    # ── 1. Lecture des données ────────────────────────────────────
-    chemin, df = lire_premier_excel(dossier)
-    out_dir    = os.path.dirname(chemin)
+    # 1. Lecture des données
+    chemin, df = lire_premier_excel(source_donnees)
+    out_dir = os.path.dirname(chemin)
 
-    # ── 2. Stabilité sur toutes les années ───────────────────────
+    # 2. Stabilité sur toutes les années
     start_timer("Stabilité toutes années")
     stable_temp_all = calcul_stabilite_toutes_annees(df, "Temperature")
-    stable_global   = stable_temp_all          # une seule variable
+    stable_global = stable_temp_all
     stop_timer("Stabilité toutes années")
 
     nb_stable = int(stable_global.sum())
-    print(f"[Stabilité] {nb_stable} points stables / {len(df)} total "
-          f"({100*nb_stable/len(df):.1f} %)")
+    print(f"[Stabilité] {nb_stable} points stables / {len(df)} total ({100 * nb_stable / len(df):.1f} %)")
 
-    # Masque référence stable (2018-2019 uniquement)
     stable_ref = stable_global & df["Année"].isin(annee_ref)
 
-    # ── 3. Critères + histogramme croisé (sur la référence) ──────
+    # 3. Critères + histogramme croisé
     df_ref = filtrer_annees(df, annee_ref)
-    bins   = plage_pente_temperature
-    s      = SEUILS_PENTE["Temperature"]
+    bins = plage_pente_temperature
+    s = SEUILS_PENTE["Temperature"]
 
     res, pct, agg = analyser_variable(
         df_ref, "Temperature", s["pmin"], s["pmax"], s["r2max"], bins
@@ -906,26 +867,26 @@ def main():
 
     if res is not None and not res.empty:
         print(f"[Critères] {len(res)} fenêtres analysées sur la référence.")
+
         if pct is not None:
             print(pct.to_string(index=False))
 
         plot_scatter_pente_R2(res, "Temperature", show_r2_threshold=True).write_html(
             os.path.join(out_dir, "criteres_stabilite_Temperature.html")
         )
+
         plot_histogram_croise(res, "Temperature").write_html(
             os.path.join(out_dir, "histogramme_croise_Temperature.html")
         )
     else:
         print("[Critères] Aucun segment exploitable sur la référence.")
 
-    # ── 4. Domaine temporel brut ──────────────────────────────────
+    # 4. Domaine temporel brut
     stable_temp_ref = stable_temp_all & df["Année"].isin(annee_ref)
     fig_temp = plot_temperature_domaine_temporel(df, stable_temp_ref)
-    fig_temp.write_html(
-        os.path.join(out_dir, "temperature_temporelle.html")
-    )
+    fig_temp.write_html(os.path.join(out_dir, "temperature_temporelle.html"))
 
-    # ── 5. σ de référence (Aitouche IV.1) ────────────────────────
+    # 5. σ de référence
     try:
         mu_ref, sigma_ref = calcul_sigma_temperature(df, stable_ref)
         print(
@@ -937,7 +898,7 @@ def main():
         print(f"[Sigma] ERREUR : {e}")
         return
 
-    # ── 6. Calcul du TCN par fenêtre glissante ───────────────────
+    # 6. Calcul du TCN
     start_timer("Calcul TCN")
     tcn_df = calcul_tcn_fenetres(
         df,
@@ -949,19 +910,21 @@ def main():
     stop_timer("Calcul TCN")
 
     print(f"[TCN] {len(tcn_df)} fenêtres calculées")
+
     if not tcn_df.empty:
         print(
             tcn_df.groupby(["Année", "etat"])
-                  .size()
-                  .unstack(fill_value=0)
-                  .to_string()
+            .size()
+            .unstack(fill_value=0)
+            .to_string()
         )
 
-    # ── 7. Plots TCN ─────────────────────────────────────────────
+    # 7. Plots TCN
     if not tcn_df.empty:
         plot_tcn_annees_superposees(tcn_df).write_html(
             os.path.join(out_dir, "tcn_temperature_superpose.html")
         )
+
         plot_tcn_continu(
             tcn_df,
             years_order=(2018, 2019, 2020, 2021, 2022, 2023, 2024, 2025),
@@ -969,7 +932,7 @@ def main():
             export_html=True,
         )
 
-    # ── 8. Localisation du type de défaut ────────────────────────
+    # 8. Localisation du type de défaut
     if not tcn_df.empty:
         start_timer("Localisation")
         localisation_df = localiser_defaut(tcn_df, sigma_ref)
@@ -983,20 +946,16 @@ def main():
             ]
             print(localisation_df[cols_affich].to_string(index=False))
 
-            # Export Excel du tableau de localisation
             path_excel = os.path.join(out_dir, "localisation_defauts.xlsx")
             localisation_df.to_excel(path_excel, index=False)
             print(f"[Localisation] Tableau sauvegardé : {path_excel}")
 
-            # Plot de localisation
             fig_loc = plot_localisation_defauts(localisation_df, tcn_df)
-            fig_loc.write_html(
-                os.path.join(out_dir, "localisation_defauts.html")
-            )
+            fig_loc.write_html(os.path.join(out_dir, "localisation_defauts.html"))
         else:
             print("[Localisation] Aucun défaut détecté sur la période analysée.")
 
-    # ── 9. Résumé des temps d'exécution ──────────────────────────
+    # 9. Résumé des temps d'exécution
     print("\n--- Temps d'exécution ---")
     for k, v in profiling.items():
         print(f"  {k:<35s}: {v:.2f} s")
