@@ -1,0 +1,44 @@
+faut garder les calculs de scores cool,
+et je suis confus sur le diagragramme ou representatiton des rations aberrantes, 
+faut garder mes anciens calcul sur la zone de reference il me faut une zonne de refenrece solide (def calcul_stabilite_ref(df, var_name, annees=annee_ref):
+    """Masque booléen True pour les lignes stables (2018–2019 uniquement)."""
+    seuils = SEUILS_PENTE[var_name]
+    pmin, pmax, r2max = seuils['pmin'], seuils['pmax'], seuils['r2max']
+
+    res_mask = np.zeros(len(df), dtype=bool)
+    mask_years = df['Année'].isin(annees)
+
+    secs = df.loc[mask_years, 'Secondes'].values
+    signal = df.loc[mask_years, var_name].values
+    if len(secs) == 0:
+        return res_mask
+
+    T_loc = secs[-1]
+    for t in range(0, int(T_loc - T_segment + 1), pas_glissement):
+        idx = (secs >= t) & (secs < t + T_segment)
+        x = secs[idx]; y = signal[idx]
+        if len(x) < 12:
+            continue
+
+        A = np.vstack([x, np.ones_like(x)]).T
+        pente, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+        R2 = np.std(y - (pente*x + intercept))
+
+        if (pmin <= pente <= pmax) and (R2 <= r2max):
+            global_idx = df.index[mask_years][idx]
+            res_mask[global_idx] = True
+
+    return res_mask)
+
+voici quelque chagemment que je veux appliquer sur mes calcul (
+comment on peut prsenter l'evolution temporelle
+
+alors on va se focus seulement sur la difference du modele optimisé et le modele mesuré
+au lieu de ploté  la, temperature en fonction du temps , mais leur residus entre la gression lineaire et le signal =res 
+deja les calculs se font sur ces valeurs, donc la representaton doit  etre ça les residus en fonction du temps et les couleurs s'y appliquent
+surpprime l'histogramme croisé et le diagramme des residus va entre x= res, et y=pentes faison le comme ça et la reference va etre determiner grace à ce diagramme qu'on pourra y mettre les zones de refere,ce qu'on veut ( comme dans mon ancien script )
+garder les caulc de stabilité calculer sur les années de reference 2018 et 2019
+
+donc on suprimme l'histogramme croisé, et l'evolution dans le temps va etre les residus en fonction du temps
+on est toujours sur les memes crtere si les valeurs n'on pas respecté ces criteres on y applique les couleurs mise en place, tout au long du signal les valeurs restetnt noires sauf s'ils sont en degradation grossieres ou progressive
+tous ces cacluls s'appliqueront à partir de la difference (res)]
