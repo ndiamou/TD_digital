@@ -1,0 +1,1000 @@
+# =============================================================================
+# SCRIPT GENERAL CORRIGE
+# Analyse de dégradation d'un capteur de température
+# Basé sur :
+# - fenêtres glissantes
+# - régressions linéaires locales
+# - pentes locales
+# - résidus entre le signal mesuré et le modèle local
+# - zone de référence solide construite sur 2018-2019
+#
+# AUTEUR : version reconstruite et clarifiée
+# =============================================================================
+
+import os
+import numpy as np
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+
+
+# =============================================================================
+# 1) PARAMETRES GENERAUX
+# =============================================================================
+
+# -------------------------------------------------------------------------
+# Fichier Excel d'entrée
+# -------------------------------------------------------------------------
+FICHIER_EXCEL = "donnees_temperature.xlsx"
+
+# -------------------------------------------------------------------------
+# Noms des colonnes dans le fichier Excel
+# Adapte ces noms si ton fichier n'utilise pas exactement cela
+# -------------------------------------------------------------------------
+COL_DATE = "Date"
+COL_VAR = "Temperature"
+
+# -------------------------------------------------------------------------
+# Années de référence
+# -------------------------------------------------------------------------
+annee_ref = [2018, 2019]
+
+# -------------------------------------------------------------------------
+# Paramètres des fenêtres glissantes
+# T_segment : taille de fenêtre
+# pas_glissement : pas de glissement
+#
+# IMPORTANT :
+# Ici on raisonne en "secondes locales dans l'année" si la colonne Date existe.
+# Si tes données ne sont pas à la seconde, ce n'est pas grave :
+# on convertit simplement la date en temps relatif.
+# -------------------------------------------------------------------------
+T_segment = 7200         # exemple : 7200 secondes = 2 heures
+pas_glissement = 1800    # exemple : 1800 secondes = 30 minutes
+
+# -------------------------------------------------------------------------
+# Nombre minimum de points nécessaires dans une fenêtre
+# Si trop peu de points, la fenêtre est ignorée
+# -------------------------------------------------------------------------
+NB_MIN_POINTS_FENETRE = 12
+
+# -------------------------------------------------------------------------
+# Seuils de référence pour la stabilité
+# Ici on garde ta logique ancienne :
+# une fenêtre de référence est stable si :
+#   pmin <= pente <= pmax
+#   et std(residus) <= r2max
+#
+# Ces seuils sont à adapter à ton signal réel de température.
+# -------------------------------------------------------------------------
+SEUILS_PENTE = {
+    "Temperature": {
+        "pmin": -0.01,   # pente min admissible dans la référence
+        "pmax":  0.01,   # pente max admissible dans la référence
+        "r2max":  0.5    # dispersion max des résidus dans la référence
+    }
+}
+
+# -------------------------------------------------------------------------
+# Seuils pour les anomalies
+# -------------------------------------------------------------------------
+K_OUTLIER = 3.0
+
+# Défaut grossier : signal figé
+EPS_SIGMA_FIGE = 0.20     # sigma_res très faible par rapport à la référence
+EPS_PENTE_FIGE = 0.001    # pente proche de zéro
+
+# Défaut grossier : saturation
+# bornes physiques à adapter selon ton capteur
+Y_MIN_CAPTEUR = -40
+Y_MAX_CAPTEUR = 150
+EPS_SATURATION = 0.5
+
+# Perte brutale de variabilité
+SEUIL_PERTE_VARIABILITE = 0.30
+
+# Persistance temporelle
+N_CRIT_GROSSIER = 3
+N_CRIT_DERIVE = 3
+
+# Ecart moyen relatif en %
+SEUIL_POURCENT_ALERTE = 5.0
+SEUIL_POURCENT_FORT = 10.0
+
+
+# =============================================================================
+# 2) FONCTIONS UTILES
+# =============================================================================
+
+def verifier_colonnes(df, colonnes_obligatoires):
+    """
+    Vérifie que les colonnes nécessaires existent dans le DataFrame.
+    """
+    manquantes = [c for c in colonnes_obligatoires if c not in df.columns]
+    if manquantes:
+        raise ValueError(f"Colonnes manquantes dans le fichier : {manquantes}")
+
+
+def construire_colonnes_temps(df, col_date):
+    """
+    A partir de la colonne Date :
+    - convertit au format datetime
+    - crée l'année
+    - crée un temps local dans l'année en secondes
+    
+    Pourquoi ?
+    Parce que ton ancien script travaillait avec une logique
+    de balayage par fenêtres sur des secondes.
+    """
+    df = df.copy()
+
+    df[col_date] = pd.to_datetime(df[col_date], errors="coerce")
+
+    # On supprime les lignes sans date valide
+    df = df.dropna(subset=[col_date]).copy()
+
+    # Tri chronologique
+    df = df.sort_values(by=col_date).reset_index(drop=True)
+
+    # Année
+    df["Année"] = df[col_date].dt.year
+
+    # Début de chaque année
+    debut_annee = pd.to_datetime(df["Année"].astype(str) + "-01-01 00:00:00")
+
+    # Secondes écoulées depuis le début de l'année
+    df["Secondes"] = (df[col_date] - debut_annee).dt.total_seconds()
+
+    return df
+
+
+def regression_lineaire_locale(x, y):
+    """
+    Calcule la régression linéaire locale :
+        y = pente * x + intercept
+
+    Retourne :
+    - pente
+    - intercept
+    - y_hat
+    - résidus
+    - std_res
+    - rmse_res
+    """
+    A = np.vstack([x, np.ones_like(x)]).T
+    pente, intercept = np.linalg.lstsq(A, y, rcond=None)[0]
+
+    y_hat = pente * x + intercept
+    residus = y - y_hat
+
+    std_res = np.std(residus) if len(residus) > 1 else 0.0
+    rmse_res = np.sqrt(np.mean(residus ** 2)) if len(residus) > 0 else 0.0
+
+    return pente, intercept, y_hat, residus, std_res, rmse_res
+
+
+def consecutive_count(condition_series):
+    """
+    Calcule le nombre de True consécutifs jusqu'à chaque position.
+    Exemple :
+    [False, True, True, False, True] -> [0, 1, 2, 0, 1]
+    """
+    result = []
+    c = 0
+    for val in condition_series:
+        if val:
+            c += 1
+        else:
+            c = 0
+        result.append(c)
+    return result
+
+
+# =============================================================================
+# 3) CONSTRUCTION DE LA ZONE DE REFERENCE SOLIDE
+# =============================================================================
+
+def calcul_stabilite_ref(df, var_name, annees=annee_ref):
+    """
+    Masque booléen True pour les lignes stables (2018–2019 uniquement).
+
+    Logique :
+    - on garde seulement les années de référence
+    - on balaie des fenêtres glissantes
+    - dans chaque fenêtre on calcule :
+        pente, intercept, résidus, dispersion des résidus
+    - si :
+        pmin <= pente <= pmax
+        et std(residus) <= r2max
+      alors la fenêtre est considérée stable
+
+    Les points appartenant à ces fenêtres stables reçoivent True.
+    """
+    seuils = SEUILS_PENTE[var_name]
+    pmin, pmax, r2max = seuils["pmin"], seuils["pmax"], seuils["r2max"]
+
+    res_mask = np.zeros(len(df), dtype=bool)
+
+    mask_years = df["Année"].isin(annees)
+
+    secs = df.loc[mask_years, "Secondes"].values
+    signal = df.loc[mask_years, var_name].values
+
+    if len(secs) == 0:
+        return res_mask
+
+    T_loc = secs[-1]
+
+    for t in range(0, int(T_loc - T_segment + 1), pas_glissement):
+        idx = (secs >= t) & (secs < t + T_segment)
+        x = secs[idx]
+        y = signal[idx]
+
+        # On enlève les NaN éventuels
+        mask_valid = ~np.isnan(y)
+        x = x[mask_valid]
+        y = y[mask_valid]
+
+        if len(x) < NB_MIN_POINTS_FENETRE:
+            continue
+
+        pente, intercept, y_hat, residus, std_res, rmse_res = regression_lineaire_locale(x, y)
+
+        if (pmin <= pente <= pmax) and (std_res <= r2max):
+            global_idx = df.index[mask_years][idx][mask_valid]
+            res_mask[global_idx] = True
+
+    return res_mask
+
+
+# =============================================================================
+# 4) CALCUL DE TOUTES LES FENETRES GLISSANTES SUR TOUTE LA PERIODE
+# =============================================================================
+
+def calcul_fenetres_glissantes(df, var_name):
+    """
+    Calcule toutes les caractéristiques locales sur toutes les années.
+
+    Pour chaque fenêtre glissante, on calcule :
+    - pente
+    - intercept
+    - résidus
+    - moyenne brute
+    - std brute
+    - moyenne des résidus
+    - std des résidus
+    - RMSE des résidus
+    - pourcentage de points manquants
+
+    Ensuite, pour chaque point de la fenêtre, on stocke aussi :
+    - le résidu du point
+    - la pente de sa fenêtre
+    - l'identité de la fenêtre
+
+    Cela permet ensuite :
+    - le graphe résidus vs temps
+    - le diagramme signature résidus vs pente
+    """
+    fenetres = []
+    points_detail = []
+
+    # On travaille année par année pour garder la logique de temps local
+    annees_uniques = sorted(df["Année"].dropna().unique())
+
+    id_fenetre = 0
+
+    for annee in annees_uniques:
+        df_annee = df[df["Année"] == annee].copy()
+
+        if df_annee.empty:
+            continue
+
+        secs = df_annee["Secondes"].values
+        signal = df_annee[var_name].values
+        dates = df_annee[COL_DATE].values
+        index_globaux = df_annee.index.values
+
+        if len(secs) == 0:
+            continue
+
+        T_loc = secs[-1]
+
+        for t in range(0, int(T_loc - T_segment + 1), pas_glissement):
+            idx = (secs >= t) & (secs < t + T_segment)
+
+            x = secs[idx]
+            y = signal[idx]
+            d = dates[idx]
+            idx_glob = index_globaux[idx]
+
+            nb_total = len(y)
+            nb_valides = np.sum(~np.isnan(y))
+            ratio_missing = 1 - (nb_valides / nb_total) if nb_total > 0 else 1.0
+
+            # Si trop peu de points dans la fenêtre -> fenêtre ignorée
+            if nb_valides < NB_MIN_POINTS_FENETRE:
+                continue
+
+            # On enlève les NaN pour les calculs
+            valid = ~np.isnan(y)
+            x_valid = x[valid]
+            y_valid = y[valid]
+            d_valid = d[valid]
+            idx_valid = idx_glob[valid]
+
+            pente, intercept, y_hat, residus, std_res, rmse_res = regression_lineaire_locale(x_valid, y_valid)
+
+            y_mean = np.mean(y_valid)
+            y_std = np.std(y_valid) if len(y_valid) > 1 else 0.0
+            res_mean = np.mean(residus) if len(residus) > 0 else 0.0
+
+            # Date centre de la fenêtre
+            pos_centre = len(d_valid) // 2
+            date_centre = d_valid[pos_centre]
+
+            # Enregistrement niveau fenêtre
+            fenetres.append({
+                "id_fenetre": id_fenetre,
+                "annee": annee,
+                "t_debut": t,
+                "t_fin": t + T_segment,
+                "date_centre": date_centre,
+                "pente": pente,
+                "intercept": intercept,
+                "moyenne_brute": y_mean,
+                "std_brut": y_std,
+                "moyenne_res": res_mean,
+                "std_res": std_res,
+                "rmse_res": rmse_res,
+                "nb_points": len(y_valid),
+                "ratio_missing": ratio_missing
+            })
+
+            # Enregistrement niveau point
+            for i in range(len(y_valid)):
+                points_detail.append({
+                    "id_fenetre": id_fenetre,
+                    "index_global": idx_valid[i],
+                    "Date": d_valid[i],
+                    "Année": annee,
+                    "Secondes": x_valid[i],
+                    "valeur_mesuree": y_valid[i],
+                    "valeur_modele": y_hat[i],
+                    "residu": residus[i],
+                    "pente_fenetre": pente
+                })
+
+            id_fenetre += 1
+
+    df_fenetres = pd.DataFrame(fenetres)
+    df_points = pd.DataFrame(points_detail)
+
+    return df_fenetres, df_points
+
+
+# =============================================================================
+# 5) CALCUL DES STATISTIQUES DE REFERENCE SUR LA ZONE SOLIDE
+# =============================================================================
+
+def calcul_stats_reference(df, df_fenetres, df_points, mask_ref_points):
+    """
+    Calcule les statistiques de référence à partir de la zone stable 2018-2019.
+
+    On utilise ici la vraie zone stable issue de calcul_stabilite_ref.
+    Ensuite on garde seulement :
+    - les points stables
+    - les fenêtres qui contiennent au moins un nombre significatif de points stables
+
+    On calcule :
+    - moyenne et dispersion des résidus de référence
+    - moyenne et dispersion des pentes de référence
+    - taux d'aberrants de référence
+    """
+    # Points stables
+    df_points_ref = df_points[df_points["index_global"].isin(df.index[mask_ref_points])].copy()
+
+    if df_points_ref.empty:
+        raise ValueError("Aucun point de référence stable n'a été détecté. Vérifie les seuils de référence.")
+
+    # Fenêtres associées à la référence
+    ids_ref = df_points_ref["id_fenetre"].unique()
+    df_fenetres_ref = df_fenetres[df_fenetres["id_fenetre"].isin(ids_ref)].copy()
+
+    if df_fenetres_ref.empty:
+        raise ValueError("Aucune fenêtre de référence stable n'a été détectée.")
+
+    # Statistiques de référence sur les résidus
+    mu_res_ref = df_points_ref["residu"].mean()
+    sigma_res_ref = df_points_ref["residu"].std(ddof=1)
+
+    # Statistiques de référence sur les pentes
+    mu_pente_ref = df_fenetres_ref["pente"].mean()
+    sigma_pente_ref = df_fenetres_ref["pente"].std(ddof=1)
+
+    # Dispersion moyenne des résidus
+    mu_std_res_ref = df_fenetres_ref["std_res"].mean()
+    mu_rmse_res_ref = df_fenetres_ref["rmse_res"].mean()
+
+    # Moyenne brute de la température sur la référence
+    mu_brut_ref = df_fenetres_ref["moyenne_brute"].mean()
+    sigma_brut_ref = df_fenetres_ref["std_brut"].mean()
+
+    # Sécurités contre division par zéro
+    if pd.isna(sigma_res_ref) or sigma_res_ref == 0:
+        sigma_res_ref = 1e-12
+
+    if pd.isna(sigma_pente_ref) or sigma_pente_ref == 0:
+        sigma_pente_ref = 1e-12
+
+    if pd.isna(mu_std_res_ref) or mu_std_res_ref == 0:
+        mu_std_res_ref = 1e-12
+
+    if pd.isna(mu_rmse_res_ref) or mu_rmse_res_ref == 0:
+        mu_rmse_res_ref = 1e-12
+
+    if pd.isna(sigma_brut_ref) or sigma_brut_ref == 0:
+        sigma_brut_ref = 1e-12
+
+    # Taux d'aberrants de référence :
+    # un point est aberrant si |res| > K_OUTLIER * sigma_res_ref
+    nb_ab_ref = np.sum(np.abs(df_points_ref["residu"].values - mu_res_ref) > K_OUTLIER * sigma_res_ref)
+    T_ab_ref = nb_ab_ref / len(df_points_ref) if len(df_points_ref) > 0 else 1e-12
+
+    if T_ab_ref == 0:
+        T_ab_ref = 1e-12
+
+    return {
+        "df_points_ref": df_points_ref,
+        "df_fenetres_ref": df_fenetres_ref,
+        "mu_res_ref": mu_res_ref,
+        "sigma_res_ref": sigma_res_ref,
+        "mu_pente_ref": mu_pente_ref,
+        "sigma_pente_ref": sigma_pente_ref,
+        "mu_std_res_ref": mu_std_res_ref,
+        "mu_rmse_res_ref": mu_rmse_res_ref,
+        "mu_brut_ref": mu_brut_ref,
+        "sigma_brut_ref": sigma_brut_ref,
+        "T_ab_ref": T_ab_ref
+    }
+
+
+# =============================================================================
+# 6) CALCUL DES SCORES ET CLASSIFICATION DES FENETRES
+# =============================================================================
+
+def classer_fenetres(df_fenetres, df_points, stats_ref):
+    """
+    Calcule tous les scores voulus et attribue une classe à chaque fenêtre.
+
+    Rappel :
+    - tout est recentré sur les résidus
+    - les couleurs seront appliquées ensuite aux points via la classe de la fenêtre
+
+    Scores calculés :
+    - Z_mu_res     = |moyenne_res - mu_res_ref| / sigma_res_ref
+    - Z_sigma_res  = std_res / mu_std_res_ref
+    - Z_pente      = |pente - mu_pente_ref| / sigma_pente_ref
+    - T_ab_courant = taux d'aberrants dans la fenêtre
+    - Ratio_ab     = T_ab_courant / T_ab_ref
+    - ecart_pourcent = ((moyenne_brute - mu_brut_ref) / mu_brut_ref) * 100
+    """
+    mu_res_ref = stats_ref["mu_res_ref"]
+    sigma_res_ref = stats_ref["sigma_res_ref"]
+    mu_pente_ref = stats_ref["mu_pente_ref"]
+    sigma_pente_ref = stats_ref["sigma_pente_ref"]
+    mu_std_res_ref = stats_ref["mu_std_res_ref"]
+    T_ab_ref = stats_ref["T_ab_ref"]
+    mu_brut_ref = stats_ref["mu_brut_ref"]
+    sigma_brut_ref = stats_ref["sigma_brut_ref"]
+
+    resultats = []
+
+    for _, row in df_fenetres.iterrows():
+        idf = row["id_fenetre"]
+
+        # Points de la fenêtre
+        pts = df_points[df_points["id_fenetre"] == idf].copy()
+
+        residus = pts["residu"].values if not pts.empty else np.array([])
+
+        # Taux d'aberrants dans la fenêtre
+        if len(residus) > 0:
+            nb_ab = np.sum(np.abs(residus - mu_res_ref) > K_OUTLIER * sigma_res_ref)
+            T_ab_courant = nb_ab / len(residus)
+        else:
+            T_ab_courant = np.nan
+
+        Ratio_ab = T_ab_courant / T_ab_ref if pd.notna(T_ab_courant) else np.nan
+
+        # Scores principaux
+        Z_mu_res = abs(row["moyenne_res"] - mu_res_ref) / sigma_res_ref
+        Z_sigma_res = row["std_res"] / mu_std_res_ref
+        Z_pente = abs(row["pente"] - mu_pente_ref) / sigma_pente_ref
+
+        # Ecart moyen brut en %
+        if mu_brut_ref != 0:
+            ecart_pourcent = ((row["moyenne_brute"] - mu_brut_ref) / mu_brut_ref) * 100
+        else:
+            ecart_pourcent = np.nan
+
+        # -----------------------------------------------------------------
+        # Défauts grossiers
+        # -----------------------------------------------------------------
+
+        # 1) Signal figé :
+        # dispersion des résidus très faible + pente quasi nulle
+        signal_fige = (
+            row["std_res"] < EPS_SIGMA_FIGE * mu_std_res_ref
+            and abs(row["pente"]) < EPS_PENTE_FIGE
+        )
+
+        # 2) Signal saturé :
+        # moyenne brute trop proche des bornes physiques
+        signal_sature = (
+            row["moyenne_brute"] <= Y_MIN_CAPTEUR + EPS_SATURATION
+            or row["moyenne_brute"] >= Y_MAX_CAPTEUR - EPS_SATURATION
+        )
+
+        # 3) Perte brutale de variabilité
+        perte_variabilite = row["std_res"] < SEUIL_PERTE_VARIABILITE * mu_std_res_ref
+
+        # -----------------------------------------------------------------
+        # Dégradation progressive
+        # -----------------------------------------------------------------
+
+        crit_zmu = Z_mu_res >= 2
+        crit_zsigma = Z_sigma_res >= 1.5
+        crit_zpente = Z_pente >= 2
+        crit_ratio_ab = pd.notna(Ratio_ab) and Ratio_ab >= 2
+        crit_pourcent = pd.notna(ecart_pourcent) and abs(ecart_pourcent) >= SEUIL_POURCENT_ALERTE
+
+        degradation_progressive = any([
+            crit_zmu,
+            crit_zsigma,
+            crit_zpente,
+            crit_ratio_ab,
+            crit_pourcent
+        ])
+
+        # Classe provisoire
+        if signal_fige or signal_sature or perte_variabilite:
+            classe = "grossier"
+        elif degradation_progressive:
+            classe = "degradation"
+        else:
+            classe = "normal"
+
+        resultats.append({
+            "id_fenetre": idf,
+            "Z_mu_res": Z_mu_res,
+            "Z_sigma_res": Z_sigma_res,
+            "Z_pente": Z_pente,
+            "T_ab_courant": T_ab_courant,
+            "Ratio_ab": Ratio_ab,
+            "ecart_pourcent": ecart_pourcent,
+            "signal_fige": signal_fige,
+            "signal_sature": signal_sature,
+            "perte_variabilite": perte_variabilite,
+            "degradation_progressive": degradation_progressive,
+            "classe_provisoire": classe
+        })
+
+    df_scores = pd.DataFrame(resultats)
+
+    # Fusion avec df_fenetres
+    df_fenetres = df_fenetres.merge(df_scores, on="id_fenetre", how="left")
+
+    # ---------------------------------------------------------------------
+    # Ajout de la persistance dans le temps
+    # ---------------------------------------------------------------------
+    df_fenetres = df_fenetres.sort_values(by="date_centre").reset_index(drop=True)
+
+    grossier_bool = df_fenetres["classe_provisoire"] == "grossier"
+    derive_bool = df_fenetres["Z_mu_res"].fillna(0) > 2
+
+    df_fenetres["grossier_consecutif"] = consecutive_count(grossier_bool)
+    df_fenetres["derive_consecutif"] = consecutive_count(derive_bool)
+
+    classes_finales = []
+
+    for _, row in df_fenetres.iterrows():
+        if row["classe_provisoire"] == "grossier":
+            # Signal saturé ou figé : on garde directement grossier
+            if row["signal_fige"] or row["signal_sature"]:
+                classes_finales.append("grossier")
+                continue
+
+            # Ou si le défaut grossier persiste
+            if row["grossier_consecutif"] >= N_CRIT_GROSSIER:
+                classes_finales.append("grossier")
+                continue
+
+            # Sinon on peut laisser temporairement normal si doute
+            classes_finales.append("normal")
+            continue
+
+        if row["classe_provisoire"] == "degradation":
+            # Si dérive persistante
+            if row["derive_consecutif"] >= N_CRIT_DERIVE:
+                classes_finales.append("degradation")
+                continue
+
+            # Si score très fort, on garde aussi dégradation
+            if row["Z_mu_res"] >= 3 or row["Ratio_ab"] >= 3 or row["Z_sigma_res"] >= 2:
+                classes_finales.append("degradation")
+                continue
+
+            # Sinon simple surveillance, mais on reste en normal pour la couleur
+            classes_finales.append("normal")
+            continue
+
+        classes_finales.append("normal")
+
+    df_fenetres["classe_finale"] = classes_finales
+
+    return df_fenetres
+
+
+# =============================================================================
+# 7) PROPAGATION DE LA CLASSE DE FENETRE AUX POINTS
+# =============================================================================
+
+def attribuer_classes_aux_points(df_points, df_fenetres):
+    """
+    Ajoute à chaque point :
+    - la classe finale de sa fenêtre
+    - les scores de sa fenêtre
+
+    Cela permet ensuite :
+    - le graphe résidus vs temps coloré
+    - le diagramme résidus vs pente coloré
+    """
+    colonnes_utiles = [
+        "id_fenetre",
+        "classe_finale",
+        "Z_mu_res",
+        "Z_sigma_res",
+        "Z_pente",
+        "Ratio_ab",
+        "signal_fige",
+        "signal_sature",
+        "perte_variabilite"
+    ]
+
+    df_points = df_points.merge(
+        df_fenetres[colonnes_utiles],
+        on="id_fenetre",
+        how="left"
+    )
+
+    return df_points
+
+
+# =============================================================================
+# 8) SAUVEGARDE EXCEL
+# =============================================================================
+
+def sauvegarder_resultats(df_fenetres, df_points, stats_ref):
+    """
+    Sauvegarde les résultats dans un fichier Excel multi-feuilles.
+    """
+    nom_fichier_sortie = "resultats_capteur_temperature_corriges.xlsx"
+
+    with pd.ExcelWriter(nom_fichier_sortie, engine="openpyxl") as writer:
+        df_fenetres.to_excel(writer, sheet_name="Fenetres", index=False)
+        df_points.to_excel(writer, sheet_name="Points_residus", index=False)
+        stats_table = pd.DataFrame([{
+            "mu_res_ref": stats_ref["mu_res_ref"],
+            "sigma_res_ref": stats_ref["sigma_res_ref"],
+            "mu_pente_ref": stats_ref["mu_pente_ref"],
+            "sigma_pente_ref": stats_ref["sigma_pente_ref"],
+            "mu_std_res_ref": stats_ref["mu_std_res_ref"],
+            "mu_rmse_res_ref": stats_ref["mu_rmse_res_ref"],
+            "mu_brut_ref": stats_ref["mu_brut_ref"],
+            "sigma_brut_ref": stats_ref["sigma_brut_ref"],
+            "T_ab_ref": stats_ref["T_ab_ref"]
+        }])
+        stats_table.to_excel(writer, sheet_name="Stats_reference", index=False)
+
+    print(f"Résultats sauvegardés dans : {nom_fichier_sortie}")
+
+
+# =============================================================================
+# 9) GRAPHIQUES
+# =============================================================================
+
+def tracer_residus_vs_temps(df_points, df, mask_ref_points):
+    """
+    Graphe principal :
+    résidus en fonction du temps, avec les couleurs voulues.
+    """
+    couleurs = {
+        "normal": "black",
+        "degradation": "orange",
+        "grossier": "red"
+    }
+
+    fig = go.Figure()
+
+    # Zone de référence affichée en fond léger
+    df_ref_visu = df.loc[mask_ref_points, [COL_DATE, COL_VAR]].copy()
+    if not df_ref_visu.empty:
+        fig.add_trace(go.Scatter(
+            x=df_ref_visu[COL_DATE],
+            y=np.zeros(len(df_ref_visu)),  # on place visuellement la zone sur y=0
+            mode="markers",
+            name="Zone de référence (points stables)",
+            marker=dict(color="green", size=3, opacity=0.20)
+        ))
+
+    # Tracé des résidus par classe
+    for classe in ["normal", "degradation", "grossier"]:
+        sous_df = df_points[df_points["classe_finale"] == classe].copy()
+
+        if not sous_df.empty:
+            fig.add_trace(go.Scatter(
+                x=sous_df["Date"],
+                y=sous_df["residu"],
+                mode="markers",
+                name=f"Résidus - {classe}",
+                marker=dict(color=couleurs[classe], size=5, opacity=0.8)
+            ))
+
+    # Données manquantes affichées en jaune
+    df_missing = df[df[COL_VAR].isna()].copy()
+    if not df_missing.empty:
+        fig.add_trace(go.Scatter(
+            x=df_missing[COL_DATE],
+            y=[0] * len(df_missing),
+            mode="markers",
+            name="Données manquantes",
+            marker=dict(color="yellow", size=7, line=dict(color="black", width=0.5))
+        ))
+
+    fig.add_hline(y=0, line_dash="dash", line_color="gray")
+
+    fig.update_layout(
+        title="Graphe 1 - Résidus en fonction du temps",
+        xaxis_title="Temps",
+        yaxis_title="Résidu = signal mesuré - modèle local",
+        template="plotly_white"
+    )
+
+    fig.show()
+
+
+def tracer_boxplots_reference_vs_courant(df_fenetres):
+    """
+    Boxplots :
+    - pentes référence vs courant
+    - std(res) référence vs courant
+    - ratio d'aberrants référence vs courant (ou plutôt T_ab)
+    """
+    df_ref = df_fenetres[df_fenetres["annee"].isin(annee_ref)].copy()
+    df_courant = df_fenetres[~df_fenetres["annee"].isin(annee_ref)].copy()
+
+    fig = make_subplots(
+        rows=1, cols=3,
+        subplot_titles=[
+            "Pentes : référence vs courant",
+            "Dispersion des résidus : référence vs courant",
+            "Taux d'aberrants : référence vs courant"
+        ]
+    )
+
+    # 1) Pentes
+    fig.add_trace(go.Box(y=df_ref["pente"], name="Référence"), row=1, col=1)
+    fig.add_trace(go.Box(y=df_courant["pente"], name="Courant"), row=1, col=1)
+
+    # 2) std_res
+    fig.add_trace(go.Box(y=df_ref["std_res"], name="Référence"), row=1, col=2)
+    fig.add_trace(go.Box(y=df_courant["std_res"], name="Courant"), row=1, col=2)
+
+    # 3) T_ab
+    fig.add_trace(go.Box(y=df_ref["T_ab_courant"], name="Référence"), row=1, col=3)
+    fig.add_trace(go.Box(y=df_courant["T_ab_courant"], name="Courant"), row=1, col=3)
+
+    fig.update_layout(
+        title="Graphe 2 - Référence vs courant",
+        template="plotly_white",
+        showlegend=False
+    )
+
+    fig.show()
+
+
+def tracer_signature_residu_vs_pente(df_points, stats_ref):
+    """
+    Diagramme signature :
+    X = résidu
+    Y = pente
+
+    On ajoute une zone de référence visuelle :
+    - en X : mu_res_ref ± 3*sigma_res_ref
+    - en Y : mu_pente_ref ± 3*sigma_pente_ref
+    """
+    couleurs = {
+        "normal": "black",
+        "degradation": "orange",
+        "grossier": "red"
+    }
+
+    mu_res_ref = stats_ref["mu_res_ref"]
+    sigma_res_ref = stats_ref["sigma_res_ref"]
+    mu_pente_ref = stats_ref["mu_pente_ref"]
+    sigma_pente_ref = stats_ref["sigma_pente_ref"]
+
+    x0 = mu_res_ref - 3 * sigma_res_ref
+    x1 = mu_res_ref + 3 * sigma_res_ref
+    y0 = mu_pente_ref - 3 * sigma_pente_ref
+    y1 = mu_pente_ref + 3 * sigma_pente_ref
+
+    fig = go.Figure()
+
+    # Rectangle de référence
+    fig.add_shape(
+        type="rect",
+        x0=x0, x1=x1,
+        y0=y0, y1=y1,
+        line=dict(color="green", width=2),
+        fillcolor="rgba(0,255,0,0.10)"
+    )
+
+    # Points par classe
+    for classe in ["normal", "degradation", "grossier"]:
+        sous_df = df_points[df_points["classe_finale"] == classe].copy()
+
+        if not sous_df.empty:
+            fig.add_trace(go.Scatter(
+                x=sous_df["residu"],
+                y=sous_df["pente_fenetre"],
+                mode="markers",
+                name=classe,
+                marker=dict(color=couleurs[classe], size=5, opacity=0.75)
+            ))
+
+    fig.update_layout(
+        title="Graphe 3 - Signature capteur : résidu en fonction de la pente",
+        xaxis_title="Résidu",
+        yaxis_title="Pente locale",
+        template="plotly_white"
+    )
+
+    fig.show()
+
+
+def tracer_evolution_scores(df_fenetres):
+    """
+    Graphe des indicateurs quantitatifs dans le temps :
+    - Z_mu_res
+    - Z_sigma_res
+    - Ratio_ab
+    """
+    fig = make_subplots(
+        rows=3, cols=1,
+        shared_xaxes=True,
+        subplot_titles=[
+            "Evolution de Z_mu_res",
+            "Evolution de Z_sigma_res",
+            "Evolution de Ratio_ab"
+        ]
+    )
+
+    # Z_mu_res
+    fig.add_trace(go.Scatter(
+        x=df_fenetres["date_centre"],
+        y=df_fenetres["Z_mu_res"],
+        mode="lines+markers",
+        name="Z_mu_res"
+    ), row=1, col=1)
+
+    fig.add_hline(y=1, line_dash="dash", line_color="orange", row=1, col=1)
+    fig.add_hline(y=2, line_dash="dash", line_color="red", row=1, col=1)
+    fig.add_hline(y=3, line_dash="dash", line_color="darkred", row=1, col=1)
+
+    # Z_sigma_res
+    fig.add_trace(go.Scatter(
+        x=df_fenetres["date_centre"],
+        y=df_fenetres["Z_sigma_res"],
+        mode="lines+markers",
+        name="Z_sigma_res"
+    ), row=2, col=1)
+
+    fig.add_hline(y=1, line_dash="dash", line_color="orange", row=2, col=1)
+    fig.add_hline(y=1.5, line_dash="dash", line_color="red", row=2, col=1)
+    fig.add_hline(y=2, line_dash="dash", line_color="darkred", row=2, col=1)
+
+    # Ratio_ab
+    fig.add_trace(go.Scatter(
+        x=df_fenetres["date_centre"],
+        y=df_fenetres["Ratio_ab"],
+        mode="lines+markers",
+        name="Ratio_ab"
+    ), row=3, col=1)
+
+    fig.add_hline(y=1, line_dash="dash", line_color="orange", row=3, col=1)
+    fig.add_hline(y=2, line_dash="dash", line_color="red", row=3, col=1)
+    fig.add_hline(y=3, line_dash="dash", line_color="darkred", row=3, col=1)
+
+    fig.update_layout(
+        title="Graphe 4 - Evolution temporelle des scores",
+        xaxis_title="Temps",
+        template="plotly_white",
+        height=900
+    )
+
+    fig.show()
+
+
+# =============================================================================
+# 10) PROGRAMME PRINCIPAL
+# =============================================================================
+
+def main():
+    """
+    Enchaînement général du script.
+    """
+    print("Lecture du fichier Excel...")
+
+    if not os.path.exists(FICHIER_EXCEL):
+        raise FileNotFoundError(
+            f"Le fichier '{FICHIER_EXCEL}' est introuvable. "
+            "Vérifie le chemin et le nom du fichier."
+        )
+
+    df = pd.read_excel(FICHIER_EXCEL)
+
+    verifier_colonnes(df, [COL_DATE, COL_VAR])
+
+    # Construction des colonnes de temps
+    df = construire_colonnes_temps(df, COL_DATE)
+
+    print("Construction de la zone de référence solide 2018-2019...")
+
+    mask_ref_points = calcul_stabilite_ref(df, COL_VAR, annees=annee_ref)
+
+    nb_ref = np.sum(mask_ref_points)
+    print(f"Nombre de points appartenant à la référence stable : {nb_ref}")
+
+    if nb_ref == 0:
+        raise ValueError(
+            "Aucun point de référence stable n'a été trouvé. "
+            "Il faut revoir les seuils pmin, pmax, r2max."
+        )
+
+    print("Calcul de toutes les fenêtres glissantes...")
+    df_fenetres, df_points = calcul_fenetres_glissantes(df, COL_VAR)
+
+    if df_fenetres.empty or df_points.empty:
+        raise ValueError(
+            "Aucune fenêtre exploitable n'a été calculée. "
+            "Vérifie T_segment, pas_glissement et la densité des données."
+        )
+
+    print("Calcul des statistiques de référence...")
+    stats_ref = calcul_stats_reference(df, df_fenetres, df_points, mask_ref_points)
+
+    print("Calcul des scores et classification...")
+    df_fenetres = classer_fenetres(df_fenetres, df_points, stats_ref)
+
+    print("Attribution des classes aux points...")
+    df_points = attribuer_classes_aux_points(df_points, df_fenetres)
+
+    print("Sauvegarde des résultats...")
+    sauvegarder_resultats(df_fenetres, df_points, stats_ref)
+
+    print("Affichage des graphiques...")
+    tracer_residus_vs_temps(df_points, df, mask_ref_points)
+    tracer_boxplots_reference_vs_courant(df_fenetres)
+    tracer_signature_residu_vs_pente(df_points, stats_ref)
+    tracer_evolution_scores(df_fenetres)
+
+    print("Analyse terminée avec succès.")
+
+
+# =============================================================================
+# 11) LANCEMENT
+# =============================================================================
+
+if __name__ == "__main__":
+    main()
