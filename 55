@@ -1,0 +1,406 @@
+
+"""
+Analyse de température inspirée de la méthode d'Aitouche (1990), adaptée à une seule variable.
+
+But :
+- Lire un fichier Excel avec au minimum les colonnes : Date, Temperature
+- Définir une période de référence stable (ex. 2018-2019)
+- Calculer des statistiques de référence
+- Appliquer une fenêtre glissante
+- Calculer :
+    * moyenne glissante
+    * pente locale par régression linéaire
+    * résidus entre signal et régression locale
+    * écart-type local des résidus
+    * TCN adapté à une seule variable
+- Détecter : normal / alerte / défaut franc
+- Tracer les graphes utiles
+
+Auteur : ChatGPT
+"""
+
+import math
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+
+# ============================================================
+# 1) PARAMÈTRES UTILISATEUR
+# ============================================================
+
+CHEMIN_FICHIER = "temperature_exemple.xlsx"   # à remplacer par ton vrai fichier
+NOM_COL_DATE = "Date"
+NOM_COL_TEMP = "Temperature"
+
+# Période de référence stable
+DATE_REF_DEBUT = "2018-01-01"
+DATE_REF_FIN   = "2019-12-31"
+
+# Fenêtre glissante
+TAILLE_FENETRE = 30      # nombre de points dans une fenêtre
+PAS_GLISSEMENT = 5       # décalage entre deux fenêtres
+
+# Seuils inspirés d'Aitouche
+SEUIL_ALERTE = 1.96
+SEUIL_DEFAUT = 3.0
+
+# Sauvegarde
+EXPORT_RESULTATS_EXCEL = True
+NOM_FICHIER_RESULTATS = "resultats_analyse_temperature_aitouche.xlsx"
+
+
+# ============================================================
+# 2) FONCTIONS DE BASE
+# ============================================================
+
+def lire_donnees_excel(chemin_fichier, nom_col_date, nom_col_temp):
+    """
+    Lit le fichier Excel et vérifie les colonnes attendues.
+    """
+    df = pd.read_excel(chemin_fichier)
+
+    if nom_col_date not in df.columns:
+        raise ValueError(f"Colonne date introuvable : {nom_col_date}")
+
+    if nom_col_temp not in df.columns:
+        raise ValueError(f"Colonne température introuvable : {nom_col_temp}")
+
+    df = df[[nom_col_date, nom_col_temp]].copy()
+    df[nom_col_date] = pd.to_datetime(df[nom_col_date], errors="coerce")
+    df[nom_col_temp] = pd.to_numeric(df[nom_col_temp], errors="coerce")
+
+    df = df.dropna(subset=[nom_col_date, nom_col_temp]).sort_values(nom_col_date).reset_index(drop=True)
+    return df
+
+
+def calculer_reference(df, nom_col_date, nom_col_temp, date_debut, date_fin):
+    """
+    Calcule les statistiques de référence sur la période stable.
+    """
+    ref = df[(df[nom_col_date] >= pd.to_datetime(date_debut)) & (df[nom_col_date] <= pd.to_datetime(date_fin))].copy()
+
+    if len(ref) < 5:
+        raise ValueError("La période de référence contient trop peu de points.")
+
+    mu_ref = ref[nom_col_temp].mean()
+    sigma_ref = ref[nom_col_temp].std(ddof=1)
+
+    if sigma_ref == 0 or pd.isna(sigma_ref):
+        raise ValueError("sigma_ref est nul ou invalide. Impossible de normaliser le TCN.")
+
+    return ref, mu_ref, sigma_ref
+
+
+def regression_lineaire_simple(x, y):
+    """
+    Régression linéaire manuelle y = a*x + b
+    Retourne a, b, y_estime
+    """
+    n = len(x)
+
+    somme_x = np.sum(x)
+    somme_y = np.sum(y)
+    somme_xy = np.sum(x * y)
+    somme_x2 = np.sum(x * x)
+
+    denominateur = n * somme_x2 - somme_x ** 2
+
+    if denominateur == 0:
+        a = 0.0
+        b = float(np.mean(y))
+    else:
+        a = (n * somme_xy - somme_x * somme_y) / denominateur
+        b = (somme_y - a * somme_x) / n
+
+    y_est = a * x + b
+    return a, b, y_est
+
+
+def ecart_type_manuel(valeurs):
+    """
+    Ecart-type manuel échantillonnal.
+    """
+    n = len(valeurs)
+    if n < 2:
+        return 0.0
+
+    moyenne = sum(valeurs) / n
+    somme = 0.0
+    for v in valeurs:
+        somme += (v - moyenne) ** 2
+
+    variance = somme / (n - 1)
+    return math.sqrt(variance)
+
+
+def classer_tcn(valeur_absolue_tcn, seuil_alerte=1.96, seuil_defaut=3.0):
+    """
+    Classe le niveau d'anomalie.
+    """
+    if valeur_absolue_tcn > seuil_defaut:
+        return "defaut_franc"
+    elif valeur_absolue_tcn > seuil_alerte:
+        return "alerte"
+    else:
+        return "normal"
+
+
+def detecter_type_defaut(pente_locale, sigma_res_local, sigma_ref):
+    """
+    Règle simple d'interprétation du type probable de défaut.
+    Ce n'est pas la thèse mot à mot : c'est l'adaptation EC7 pour 1 seule variable.
+    """
+    # Ces seuils sont empiriques et peuvent être ajustés.
+    seuil_pente = 0.02
+    seuil_bruit = 1.5 * sigma_ref
+
+    if abs(pente_locale) >= seuil_pente:
+        return "derive_probable"
+    elif sigma_res_local >= seuil_bruit:
+        return "bruit_probable"
+    else:
+        return "biais_ou_decalage"
+
+
+# ============================================================
+# 3) ANALYSE PAR FENÊTRES GLISSANTES
+# ============================================================
+
+def analyser_temperature(df, nom_col_temp, taille_fenetre, pas_glissement, mu_ref, sigma_ref,
+                         seuil_alerte=1.96, seuil_defaut=3.0):
+    """
+    Analyse la température par fenêtres glissantes.
+    """
+    resultats = []
+
+    temperature = df[nom_col_temp].values
+
+    for debut in range(0, len(df) - taille_fenetre + 1, pas_glissement):
+        fin = debut + taille_fenetre
+        bloc = df.iloc[debut:fin].copy()
+
+        y = bloc[nom_col_temp].values.astype(float)
+        x = np.arange(len(y), dtype=float)
+
+        # Régression locale
+        pente, intercept, y_est = regression_lineaire_simple(x, y)
+
+        # Résidus
+        residus = y - y_est
+
+        # Statistiques de fenêtre
+        mu_fen = float(np.mean(y))
+        sigma_res_local = ecart_type_manuel(residus)
+
+        # TCN adapté EC7 :
+        # TCN = (moyenne_fenetre - moyenne_reference) / sigma_reference
+        tcn = (mu_fen - mu_ref) / sigma_ref
+        classe = classer_tcn(abs(tcn), seuil_alerte, seuil_defaut)
+
+        # Type probable de défaut
+        type_defaut = "aucun"
+        if classe != "normal":
+            type_defaut = detecter_type_defaut(pente, sigma_res_local, sigma_ref)
+
+        # Centre de la fenêtre
+        indice_centre = debut + len(bloc) // 2
+        date_centre = df.iloc[indice_centre]["Date"]
+
+        # Masse résiduelle
+        rmse = math.sqrt(np.mean((residus) ** 2))
+
+        resultats.append({
+            "debut_index": debut,
+            "fin_index": fin - 1,
+            "date_debut": bloc["Date"].iloc[0],
+            "date_fin": bloc["Date"].iloc[-1],
+            "date_centre": date_centre,
+            "temperature_moyenne_fenetre": mu_fen,
+            "pente_locale": pente,
+            "intercept_locale": intercept,
+            "sigma_residus": sigma_res_local,
+            "rmse_residus": rmse,
+            "tcn": tcn,
+            "abs_tcn": abs(tcn),
+            "classe": classe,
+            "type_defaut_probable": type_defaut
+        })
+
+    return pd.DataFrame(resultats)
+
+
+# ============================================================
+# 4) RÉCURSIVITÉ DE LA MOYENNE (VERSION AITOUCHE ADAPTÉE)
+# ============================================================
+
+def moyenne_recursive_mobile(signal, N):
+    """
+    Reproduit l'idée de la moyenne récursive d'Aitouche avec une seule variable.
+    - phase d'initialisation : moyenne cumulative
+    - régime établi : fenêtre mobile de taille N
+    Retourne une série de mêmes dimensions que le signal.
+    """
+    signal = np.asarray(signal, dtype=float)
+    moyennes = np.zeros(len(signal), dtype=float)
+
+    if len(signal) == 0:
+        return moyennes
+
+    # phase k <= N
+    moyenne_k = signal[0]
+    moyennes[0] = moyenne_k
+
+    for k in range(1, len(signal)):
+        if k + 1 <= N:
+            moyenne_k = moyenne_k + (1.0 / (k + 1)) * (signal[k] - moyenne_k)
+        else:
+            moyenne_k = moyennes[k - 1] + (1.0 / N) * (signal[k] - signal[k - N])
+        moyennes[k] = moyenne_k
+
+    return moyennes
+
+
+# ============================================================
+# 5) GRAPHES
+# ============================================================
+
+def tracer_graphes(df, ref, df_res, mu_ref, sigma_ref, seuil_alerte, seuil_defaut):
+    """
+    Produit les graphes principaux.
+    """
+
+    # ---------- Graphe 1 : signal + moyenne récursive + référence ----------
+    moyenne_recursive = moyenne_recursive_mobile(df["Temperature"].values, N=TAILLE_FENETRE)
+
+    plt.figure(figsize=(14, 7))
+    plt.plot(df["Date"], df["Temperature"], label="Signal température")
+    plt.plot(df["Date"], moyenne_recursive, label="Moyenne récursive mobile")
+    plt.axhline(mu_ref, linestyle="--", label="Moyenne référence")
+    plt.axhline(mu_ref + seuil_alerte * sigma_ref, linestyle="--", label="Seuil alerte haut")
+    plt.axhline(mu_ref - seuil_alerte * sigma_ref, linestyle="--", label="Seuil alerte bas")
+    plt.axhline(mu_ref + seuil_defaut * sigma_ref, linestyle=":", label="Seuil défaut haut")
+    plt.axhline(mu_ref - seuil_defaut * sigma_ref, linestyle=":", label="Seuil défaut bas")
+    plt.title("Température, moyenne récursive et seuils")
+    plt.xlabel("Date")
+    plt.ylabel("Température")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- Graphe 2 : TCN dans le temps ----------
+    plt.figure(figsize=(14, 6))
+    plt.plot(df_res["date_centre"], df_res["tcn"], label="TCN")
+    plt.axhline(seuil_alerte, linestyle="--", label="Alerte +1.96")
+    plt.axhline(-seuil_alerte, linestyle="--", label="Alerte -1.96")
+    plt.axhline(seuil_defaut, linestyle=":", label="Défaut +3.0")
+    plt.axhline(-seuil_defaut, linestyle=":", label="Défaut -3.0")
+    plt.title("TCN adapté à la température")
+    plt.xlabel("Date centre de fenêtre")
+    plt.ylabel("TCN")
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- Graphe 3 : pente locale vs sigma résidus ----------
+    plt.figure(figsize=(10, 7))
+    plt.scatter(df_res["pente_locale"], df_res["sigma_residus"])
+    plt.title("Diagramme résidus vs pente")
+    plt.xlabel("Pente locale")
+    plt.ylabel("Sigma local des résidus")
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- Graphe 4 : histogramme croisé 2D ----------
+    plt.figure(figsize=(10, 7))
+    plt.hist2d(df_res["pente_locale"], df_res["sigma_residus"], bins=20)
+    plt.colorbar(label="Nombre de fenêtres")
+    plt.title("Histogramme croisé : pente locale vs sigma résidus")
+    plt.xlabel("Pente locale")
+    plt.ylabel("Sigma local des résidus")
+    plt.tight_layout()
+    plt.show()
+
+    # ---------- Graphe 5 : classes de détection ----------
+    compte_classes = df_res["classe"].value_counts()
+
+    plt.figure(figsize=(8, 5))
+    plt.bar(compte_classes.index, compte_classes.values)
+    plt.title("Répartition des fenêtres par classe")
+    plt.xlabel("Classe")
+    plt.ylabel("Nombre de fenêtres")
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# 6) EXPORT DES RÉSULTATS
+# ============================================================
+
+def exporter_resultats(df_brut, ref, df_res, nom_fichier):
+    """
+    Exporte dans un fichier Excel.
+    """
+    with pd.ExcelWriter(nom_fichier, engine="openpyxl") as writer:
+        df_brut.to_excel(writer, sheet_name="signal_brut", index=False)
+        ref.to_excel(writer, sheet_name="reference", index=False)
+        df_res.to_excel(writer, sheet_name="analyse_fenetres", index=False)
+
+
+# ============================================================
+# 7) PROGRAMME PRINCIPAL
+# ============================================================
+
+def main():
+    df = lire_donnees_excel(CHEMIN_FICHIER, NOM_COL_DATE, NOM_COL_TEMP)
+
+    # On standardise les noms utilisés ensuite dans tout le script
+    df = df.rename(columns={NOM_COL_DATE: "Date", NOM_COL_TEMP: "Temperature"})
+
+    ref, mu_ref, sigma_ref = calculer_reference(
+        df,
+        nom_col_date="Date",
+        nom_col_temp="Temperature",
+        date_debut=DATE_REF_DEBUT,
+        date_fin=DATE_REF_FIN
+    )
+
+    df_res = analyser_temperature(
+        df=df,
+        nom_col_temp="Temperature",
+        taille_fenetre=TAILLE_FENETRE,
+        pas_glissement=PAS_GLISSEMENT,
+        mu_ref=mu_ref,
+        sigma_ref=sigma_ref,
+        seuil_alerte=SEUIL_ALERTE,
+        seuil_defaut=SEUIL_DEFAUT
+    )
+
+    print("\n================ RÉSUMÉ ================\n")
+    print(f"Moyenne de référence     : {mu_ref:.4f}")
+    print(f"Sigma de référence       : {sigma_ref:.4f}")
+    print(f"Nombre total de fenêtres : {len(df_res)}")
+
+    print("\nRépartition des classes :")
+    print(df_res["classe"].value_counts(dropna=False))
+
+    print("\nTypes probables de défaut :")
+    print(df_res["type_defaut_probable"].value_counts(dropna=False))
+
+    if EXPORT_RESULTATS_EXCEL:
+        exporter_resultats(df, ref, df_res, NOM_FICHIER_RESULTATS)
+        print(f"\nRésultats exportés dans : {NOM_FICHIER_RESULTATS}")
+
+    tracer_graphes(
+        df=df,
+        ref=ref,
+        df_res=df_res,
+        mu_ref=mu_ref,
+        sigma_ref=sigma_ref,
+        seuil_alerte=SEUIL_ALERTE,
+        seuil_defaut=SEUIL_DEFAUT
+    )
+
+
+if __name__ == "__main__":
+    main()
