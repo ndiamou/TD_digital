@@ -1,0 +1,72 @@
+README — Analyse stabilité Vitesse/Vibration
+
+Ce script analyse un fichier Excel contenant des mesures de Date, Vitesse et Vibration pour détecter les zones stables et comparer les années.
+
+1. Données attendues
+
+Le fichier Excel doit être placé dans le dossier indiqué par la variable "dossier".
+
+Colonnes obligatoires :
+
+- "Date"
+- "Vitesse"
+- "Vibration"
+
+Le script lit automatiquement le premier fichier ".xlsx" trouvé dans ce dossier.
+
+2. Installation
+
+Installer les bibliothèques nécessaires :
+
+pip install pandas numpy plotly openpyxl
+
+3. Paramètres à modifier
+
+Dans le script, adapter ces lignes selon le besoin :
+
+dossier = r"chemin_du_dossier"
+T_segment = 7200
+pas_glissement = 1800
+annee_ref = [2018, 2019]
+annees_compare = (2020, 2021, 2022, 2023, 2024, 2025)
+V_MIN = 6000
+V_MAX = 12000
+
+"dossier" indique où se trouve le fichier Excel.
+"T_segment" définit la durée de chaque fenêtre d’analyse en secondes.
+"pas_glissement" définit le déplacement entre deux fenêtres.
+"annee_ref" correspond aux années considérées comme normales.
+"annees_compare" correspond aux années à comparer avec la référence.
+"V_MIN" et "V_MAX" limitent la zone de vitesse utilisée pour la corrélation.
+
+4. Ce que fait le script
+
+Le script nettoie les données, calcule les zones stables, étudie la corrélation entre vitesse et vibration, puis calcule les résidus :
+
+résidu = vibration mesurée - vibration estimée par le modèle
+
+Les bandes "±3σ" permettent de repérer les écarts importants.
+
+5. Fichiers générés
+
+Le script crée automatiquement des graphiques HTML dans le même dossier que le fichier Excel :
+
+- "correlation_vitesse_vibration.html"
+- "criteres_stabilite_Vitesse.html"
+- "criteres_stabilite_Vibration.html"
+- "histogramme_croise_Vitesse.html"
+- "histogramme_croise_Vibration.html"
+- "temporel_an_by_an.html"
+- "temporel_continue.html"
+
+6. Exécution
+
+Lancer simplement le script avec :
+
+python nom_du_script.py
+
+7. Lecture des résultats
+
+Ouvrir les fichiers ".html" générés dans un navigateur.
+Les points ou courbes proches de la référence indiquent un comportement normal.
+Les écarts hors bandes "±3σ" signalent une anomalie possible à vérifier.
