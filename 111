@@ -1,0 +1,69 @@
+ 📋 README — Analyse Vibration / Vitesse (Stabilité & Corrélation)
+
+> **Auteur :** Mountakha Ndiaye | **Usage :** Machine Roussine – EC5
+
+---
+
+## 🎯 Ce que fait ce script
+
+Il analyse automatiquement les données de **vitesse et vibration** d'une machine sur plusieurs années pour :
+- Détecter les périodes **stables / instables** par fenêtres glissantes
+- Tracer la **corrélation Vitesse ↔ Vibration** avec une courbe polynomiale
+- Calculer les **résidus** (écart entre mesure réelle et modèle) avec bandes ±3σ
+- Générer des **graphiques HTML interactifs** directement dans le dossier des données
+
+---
+
+## ⚙️ Les 6 paramètres à modifier (en haut du script)
+
+```python
+dossier        = r"G:\...\Roussine - Vibration EC5"  # ← Chemin du dossier contenant le fichier Excel
+annee_ref      = [2018, 2019]                         # ← Années de référence (stables et saines)
+annees_compare = (2020, 2021, 2022, 2023, 2024, 2025) # ← Années à comparer
+V_MIN          = 6000                                 # ← Vitesse minimale pour la corrélation
+V_MAX          = 12000                                # ← Vitesse maximale pour la corrélation
+T_segment      = 7200                                 # ← Taille d'une fenêtre (en secondes)
+```
+
+> ⚠️ Le fichier Excel doit avoir 3 colonnes : **Date**, **Vitesse**, **Vibration** (noms exacts).
+
+---
+
+## ▶️ Comment lancer le script
+
+**1. Installer les bibliothèques** (une seule fois) :
+```bash
+pip install pandas numpy plotly openpyxl
+```
+
+**2. Lancer le script** :
+```bash
+python analyse_vibration.py
+```
+
+---
+
+## 📁 Fichiers générés automatiquement (dans le même dossier que le Excel)
+
+| Fichier HTML | Contenu |
+|---|---|
+| `correlation_vitesse_vibration.html` | Nuage de points Vitesse / Vibration + courbe polynomiale |
+| `criteres_stabilite_Vitesse.html` | Diagramme Pente vs Résidu pour la vitesse |
+| `criteres_stabilite_Vibration.html` | Diagramme Pente vs Résidu pour la vibration |
+| `histogramme_croise_Vitesse.html` | Répartition des segments par classe de pente |
+| `histogramme_croise_Vibration.html` | Idem pour la vibration |
+| `temporel_an_by_an.html` | Résidus superposés année par année avec bandes ±3σ |
+| `temporel_continue.html` | Résidus collés sur un axe continu 2018→2025 |
+
+> 💡 Ouvrez les fichiers `.html` dans n'importe quel navigateur (Chrome, Edge…). Les graphiques sont **interactifs** : zoom, survol, légende cliquable.
+
+---
+
+## ❓ Problèmes fréquents
+
+| Erreur | Solution |
+|---|---|
+| `FileNotFoundError` | Vérifiez le chemin dans `dossier` — utilisez `r"..."` |
+| `Colonne 'Date' introuvable` | Renommez la colonne dans Excel en exactement `Date` |
+| `Pas assez de points ref` | Élargissez `V_MIN` / `V_MAX` ou vérifiez les années de référence |
+| Graphiques vides | Vérifiez que `annee_ref` correspond à des années présentes dans le fichier |
